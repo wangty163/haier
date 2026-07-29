@@ -1,69 +1,195 @@
+import asyncio
 import logging
-import time
-from typing import Any, Dict
+from typing import Any
+from uuid import uuid4
 
+import aiohttp
 import voluptuous as vol
 from homeassistant import config_entries
-from homeassistant.core import callback
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers.config_validation import multi_select
+from homeassistant.helpers.selector import (
+    TextSelector,
+    TextSelectorConfig,
+    TextSelectorType,
+)
 
 from .const import DOMAIN, FILTER_TYPE_EXCLUDE, FILTER_TYPE_INCLUDE
-from .core.client import HaierClientException, HaierClient, APP_SOURCE_APP, APP_SOURCE_WXAPP, DEFAULT_APP_SOURCE
+from .core.auth import build_account_data
+from .core.client import APP_SOURCE_APP, HaierClient, HaierClientException
 from .core.config import AccountConfig, DeviceFilterConfig, EntityFilterConfig
 
 _LOGGER = logging.getLogger(__name__)
 
-CLIENT_ID = 'client_id'
-REFRESH_TOKEN = 'refresh_token'
-APP_SOURCE = 'app_source'
+USERNAME = 'username'
+PASSWORD = 'password'
 
-APP_SOURCE_OPTIONS = {
-    APP_SOURCE_WXAPP: '微信小程序',
-    APP_SOURCE_APP: 'App',
-}
+
+def _account_schema(
+    *,
+    default_load_all_entity: bool = True,
+    ignore_device_offline: bool = False,
+) -> vol.Schema:
+    return vol.Schema(
+        {
+            vol.Required(USERNAME): TextSelector(
+                TextSelectorConfig(autocomplete='username')
+            ),
+            vol.Required(PASSWORD): TextSelector(
+                TextSelectorConfig(
+                    type=TextSelectorType.PASSWORD,
+                    autocomplete='current-password',
+                )
+            ),
+            vol.Required(
+                'default_load_all_entity',
+                default=default_load_all_entity,
+            ): bool,
+            vol.Required(
+                'ignore_device_offline',
+                default=ignore_device_offline,
+            ): bool,
+        }
+    )
+
+
+def _reauth_schema() -> vol.Schema:
+    return vol.Schema(
+        {
+            vol.Required(USERNAME): TextSelector(
+                TextSelectorConfig(autocomplete='username')
+            ),
+            vol.Required(PASSWORD): TextSelector(
+                TextSelectorConfig(
+                    type=TextSelectorType.PASSWORD,
+                    autocomplete='current-password',
+                )
+            ),
+        }
+    )
+
+
+async def _async_authenticate(
+    hass: HomeAssistant,
+    user_input: dict[str, Any],
+    *,
+    client_id: str | None = None,
+    default_load_all_entity: bool = True,
+    ignore_device_offline: bool = False,
+) -> tuple[dict, dict]:
+    client_id = client_id or str(uuid4())
+    client = HaierClient(hass, client_id, '', APP_SOURCE_APP)
+    token_info = await client.login(
+        user_input[USERNAME],
+        user_input[PASSWORD],
+    )
+
+    client = HaierClient(hass, client_id, token_info.token, APP_SOURCE_APP)
+    user_info = await client.get_user_info()
+    account = build_account_data(
+        client_id=client_id,
+        token=token_info.token,
+        refresh_token=token_info.refresh_token,
+        expires_in=token_info.expires_in,
+        app_source=APP_SOURCE_APP,
+        default_load_all_entity=default_load_all_entity,
+        ignore_device_offline=ignore_device_offline,
+    )
+    return account, user_info
 
 class HaierConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 2
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        errors: Dict[str, str] = {}
+        errors: dict[str, str] = {}
         if user_input is not None:
             try:
-                # 根据refresh_token获取token
-                client = HaierClient(self.hass, user_input[CLIENT_ID], '', user_input[APP_SOURCE])
-                token_info = await client.refresh_token(user_input[REFRESH_TOKEN])
-                # 获取用户信息
-                client = HaierClient(self.hass, user_input[CLIENT_ID], token_info.token, user_input[APP_SOURCE])
-                user_info = await client.get_user_info()
-
-                return self.async_create_entry(title="Haier - {}".format(user_info['mobile']), data={
-                    'account': {
-                        'client_id': user_input[CLIENT_ID],
-                        'token': token_info.token,
-                        'refresh_token': token_info.refresh_token,
-                        'expires_at': int(time.time()) + token_info.expires_in,
-                        'app_source': user_input[APP_SOURCE],
-                        'default_load_all_entity': user_input['default_load_all_entity'],
-                        'ignore_device_offline': user_input['ignore_device_offline']
-                    }
-                })
+                account, user_info = await _async_authenticate(
+                    self.hass,
+                    user_input,
+                    default_load_all_entity=user_input['default_load_all_entity'],
+                    ignore_device_offline=user_input['ignore_device_offline'],
+                )
             except HaierClientException as e:
                 _LOGGER.warning(str(e))
                 errors['base'] = 'auth_error'
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                errors['base'] = 'cannot_connect'
+            except Exception:
+                _LOGGER.exception('Unexpected exception during Haier login')
+                errors['base'] = 'unknown'
+            else:
+                await self.async_set_unique_id(user_info['userId'])
+                self._abort_if_unique_id_configured()
+                return self.async_create_entry(
+                    title="Haier - {}".format(user_info['mobile']),
+                    data={'account': account},
+                )
 
         return self.async_show_form(
             step_id="user",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(CLIENT_ID): str,
-                    vol.Required(REFRESH_TOKEN): str,
-                    vol.Required(APP_SOURCE, default=DEFAULT_APP_SOURCE): vol.In(APP_SOURCE_OPTIONS),
-                    vol.Required('default_load_all_entity', default=True): bool,
-                    vol.Required('ignore_device_offline', default=False): bool,
-                }
-            ),
+            data_schema=_account_schema(),
             errors=errors
+        )
+
+    async def async_step_reauth(
+        self,
+        entry_data: dict[str, Any],
+    ) -> FlowResult:
+        """Handle an expired or revoked refresh token."""
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(
+        self,
+        user_input: dict[str, Any] | None = None,
+    ) -> FlowResult:
+        """Exchange new credentials and replace only the stored tokens."""
+        errors: dict[str, str] = {}
+        entry = self._get_reauth_entry()
+        current_account = entry.data.get('account', {})
+
+        if user_input is not None:
+            try:
+                account, user_info = await _async_authenticate(
+                    self.hass,
+                    user_input,
+                    client_id=current_account.get('client_id'),
+                    default_load_all_entity=current_account.get(
+                        'default_load_all_entity',
+                        True,
+                    ),
+                    ignore_device_offline=current_account.get(
+                        'ignore_device_offline',
+                        False,
+                    ),
+                )
+            except HaierClientException as e:
+                _LOGGER.warning(str(e))
+                errors['base'] = 'auth_error'
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                errors['base'] = 'cannot_connect'
+            except Exception:
+                _LOGGER.exception('Unexpected exception during Haier reauthentication')
+                errors['base'] = 'unknown'
+            else:
+                await self.async_set_unique_id(user_info['userId'])
+                if entry.unique_id is not None:
+                    self._abort_if_unique_id_mismatch()
+                return self.async_update_reload_and_abort(
+                    entry,
+                    unique_id=user_info['userId'],
+                    title="Haier - {}".format(user_info['mobile']),
+                    data={
+                        **entry.data,
+                        'account': account,
+                    },
+                )
+
+        return self.async_show_form(
+            step_id='reauth_confirm',
+            data_schema=_reauth_schema(),
+            errors=errors,
         )
 
     @staticmethod
@@ -93,45 +219,52 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         :param user_input:
         :return:
         """
-        errors: Dict[str, str] = {}
+        errors: dict[str, str] = {}
 
         cfg = AccountConfig(self.hass, self.config_entry)
 
         if user_input is not None:
             try:
-                # 根据refresh_token获取token
-                client = HaierClient(self.hass, user_input[CLIENT_ID], '', user_input[APP_SOURCE])
-                token_info = await client.refresh_token(user_input[REFRESH_TOKEN])
-                # 获取用户信息
-                client = HaierClient(self.hass, user_input[CLIENT_ID], token_info.token, user_input[APP_SOURCE])
-                user_info = await client.get_user_info()
-
-                cfg.client_id = user_input[CLIENT_ID]
-                cfg.token = token_info.token
-                cfg.refresh_token = token_info.refresh_token
-                cfg.expires_at = int(time.time()) + token_info.expires_in
-                cfg.app_source = user_input[APP_SOURCE]
-                cfg.default_load_all_entity = user_input['default_load_all_entity']
-                cfg.ignore_device_offline = user_input['ignore_device_offline']
-                cfg.save(user_info['mobile'])
-
-                await self.hass.config_entries.async_reload(self.config_entry.entry_id)
-
-                return self.async_create_entry(title='', data={})
+                account, user_info = await _async_authenticate(
+                    self.hass,
+                    user_input,
+                    client_id=cfg.client_id,
+                    default_load_all_entity=user_input['default_load_all_entity'],
+                    ignore_device_offline=user_input['ignore_device_offline'],
+                )
             except HaierClientException as e:
                 _LOGGER.warning(str(e))
                 errors['base'] = 'auth_error'
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                errors['base'] = 'cannot_connect'
+            except Exception:
+                _LOGGER.exception('Unexpected exception during Haier account update')
+                errors['base'] = 'unknown'
+            else:
+                user_id = user_info['userId']
+                if (
+                    self.config_entry.unique_id is not None
+                    and self.config_entry.unique_id != user_id
+                ):
+                    errors['base'] = 'account_mismatch'
+                else:
+                    self.hass.config_entries.async_update_entry(
+                        self.config_entry,
+                        unique_id=user_id,
+                        title="Haier - {}".format(user_info['mobile']),
+                        data={
+                            **self.config_entry.data,
+                            'account': account,
+                        },
+                    )
+                    await self.hass.config_entries.async_reload(self.config_entry.entry_id)
+                    return self.async_create_entry(title='', data={})
 
         return self.async_show_form(
             step_id="account",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(CLIENT_ID, default=cfg.client_id): str,
-                    vol.Required(REFRESH_TOKEN, default=cfg.refresh_token): str,
-                    vol.Required(APP_SOURCE, default=cfg.app_source): vol.In(APP_SOURCE_OPTIONS),
-                    vol.Required('default_load_all_entity', default=cfg.default_load_all_entity): bool,
-                    vol.Required('ignore_device_offline', default=cfg.ignore_device_offline): bool,
-                }
+            data_schema=_account_schema(
+                default_load_all_entity=cfg.default_load_all_entity,
+                ignore_device_offline=cfg.ignore_device_offline,
             ),
             errors=errors
         )
@@ -237,4 +370,3 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 }
             )
         )
-

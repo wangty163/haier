@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import hashlib
 import json
@@ -5,7 +7,7 @@ import logging
 import random
 import time
 from functools import wraps
-from typing import List, Dict
+from typing import Dict, List
 from urllib.parse import urlparse
 
 import aiohttp
@@ -13,6 +15,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
 
+from .auth import build_login_body, sign_request
 from .device import HaierDevice
 
 _LOGGER = logging.getLogger(__name__)
@@ -31,6 +34,7 @@ APP_SOURCES = {
     APP_SOURCE_APP: ('MB-UZHSH-0001', '5dfca8714eb26e3a776e58a8273c8752'),
 }
 
+LOGIN_API = 'https://zj.haier.net/oauthserver/account/v1/login'
 REFRESH_TOKEN_API = 'https://zj.haier.net/api-gw/oauthserver/account/v1/refreshToken'
 GET_USER_INFO_API = 'https://account-api.haier.net/v2/haier/userinfo'
 GET_DEVICES_API = 'https://uws.haier.net/uds/v1/protected/deviceinfos'
@@ -96,7 +100,10 @@ class TokenInfo:
 
 
 class HaierClientException(Exception):
-    pass
+
+    def __init__(self, message: str, code: str | None = None):
+        super().__init__(message)
+        self.code = code
 
 
 class HaierClient:
@@ -107,6 +114,30 @@ class HaierClient:
         self._app_id, self._app_key = APP_SOURCES.get(app_source, APP_SOURCES[DEFAULT_APP_SOURCE])
         self._hass = hass
         self._session = async_get_clientsession(hass)
+
+    async def login(self, username: str, password: str) -> TokenInfo:
+        """
+        使用海尔智家 App 账号密码登录。
+
+        密码只存在于本次 HTTPS 请求内；调用方应仅持久化返回的 token。
+        """
+        body = build_login_body(username, password)
+        headers = await self._generate_common_headers(LOGIN_API)
+        headers.pop('accessToken', None)
+        headers['Content-Type'] = 'application/json'
+        headers['sign'] = sign_request(
+            LOGIN_API,
+            body,
+            self._app_id,
+            self._app_key,
+            headers['timestamp']
+        )
+
+        async with self._session.post(url=LOGIN_API, headers=headers, data=body) as response:
+            response.raise_for_status()
+            content = await response.json(content_type=None)
+            self._assert_response_successful(content)
+            return self._parse_token_info(content)
 
     @retry_on_exception(exceptions=(aiohttp.ClientError, asyncio.TimeoutError))
     async def refresh_token(self, refresh_token: str) -> TokenInfo:
@@ -122,13 +153,7 @@ class HaierClient:
         async with self._session.post(url=REFRESH_TOKEN_API, headers=headers, json=payload) as response:
             content = await response.json(content_type=None)
             self._assert_response_successful(content)
-
-            token_info = content['data']['tokenInfo']
-            return TokenInfo(
-                token_info['accountToken'],
-                token_info['refreshToken'],
-                token_info['expiresIn']
-            )
+            return self._parse_token_info(content)
 
     @retry_on_exception(exceptions=(aiohttp.ClientError, asyncio.TimeoutError))
     async def get_user_info(self) -> dict:
@@ -316,7 +341,22 @@ class HaierClient:
     @staticmethod
     def _assert_response_successful(resp):
         if 'retCode' in resp and resp['retCode'] != '00000':
-            raise HaierClientException('接口返回异常: ' + resp['retInfo'])
+            raise HaierClientException(
+                '接口返回异常: ' + resp.get('retInfo', '未知错误'),
+                str(resp['retCode'])
+            )
+
+    @staticmethod
+    def _parse_token_info(resp) -> TokenInfo:
+        try:
+            token_info = resp['data']['tokenInfo']
+            return TokenInfo(
+                token_info['accountToken'],
+                token_info['refreshToken'],
+                token_info['expiresIn']
+            )
+        except (KeyError, TypeError) as err:
+            raise HaierClientException('令牌响应缺少 token 信息') from err
 
     @staticmethod
     def _sign(app_id, app_key, timestamp, body, url):

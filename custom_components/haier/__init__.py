@@ -1,18 +1,29 @@
+import asyncio
 import logging
 import time
 from datetime import timedelta
 
+import aiohttp
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers.device_registry import DeviceEntry
 from homeassistant.helpers.event import async_track_time_interval
 
-from .const import DOMAIN, SUPPORTED_PLATFORMS, FILTER_TYPE_EXCLUDE, FILTER_TYPE_INCLUDE
-from .core.client import HaierClient, HaierClientException, TokenInfo
+from .const import DOMAIN, FILTER_TYPE_EXCLUDE, SUPPORTED_PLATFORMS
+from .core.client import HaierClient, HaierClientException
 from .core.config import AccountConfig, DeviceFilterConfig, EntityFilterConfig
 from .core.device_gateway import HaierDeviceGateway
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _cancel_token_updater(hass: HomeAssistant) -> None:
+    cancel = hass.data[DOMAIN].get('cancel_token_updater')
+    if cancel is not None:
+        cancel()
+        hass.data[DOMAIN]['cancel_token_updater'] = None
+
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     hass.data.setdefault(DOMAIN, {
@@ -21,8 +32,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         'gateway_task': None,
     })
 
-    # 定时更新token
-    hass.data[DOMAIN]['cancel_token_updater'] = await token_updater(hass, entry)
+    # 先校验或刷新当前令牌；只有认证失败才进入重新认证流程。
+    try:
+        hass.data[DOMAIN]['cancel_token_updater'] = await token_updater(hass, entry)
+    except HaierClientException as err:
+        raise ConfigEntryAuthFailed(str(err)) from err
+    except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+        raise ConfigEntryNotReady("无法连接海尔云服务") from err
 
     account_cfg = AccountConfig(hass, entry)
     client = HaierClient(hass, account_cfg.client_id, account_cfg.token, account_cfg.app_source)
@@ -30,7 +46,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     # 是否忽略设备离线状态，供实体在收到离线事件时判断是否保留最后状态
     hass.data[DOMAIN]['ignore_device_offline'] = account_cfg.ignore_device_offline
 
-    devices = await client.get_devices()
+    try:
+        devices = await client.get_devices()
+    except (HaierClientException, aiohttp.ClientError, asyncio.TimeoutError) as err:
+        _cancel_token_updater(hass)
+        raise ConfigEntryNotReady("无法获取海尔设备列表") from err
+
     _LOGGER.info('共获取到{}个设备'.format(len(devices)))
     hass.data[DOMAIN]['devices'] = devices
 
@@ -89,6 +110,11 @@ async def token_updater(hass: HomeAssistant, entry: ConfigEntry):
                 await hass.config_entries.async_reload(entry.entry_id)
             else:
                 _LOGGER.debug('token is valid')
+        except HaierClientException:
+            _LOGGER.warning('token refresh failed; reauthentication required')
+            entry.async_start_reauth_if_available(hass)
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            _LOGGER.warning('token refresh failed because Haier cloud is unavailable')
         except Exception:
             _LOGGER.exception('token update failed')
 
@@ -104,7 +130,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
 
     # 停止token更新
     if hass.data[DOMAIN]['cancel_token_updater']:
-        hass.data[DOMAIN]['cancel_token_updater']()
+        _cancel_token_updater(hass)
         _LOGGER.info('token updater stopped')
 
     # 断开网关
