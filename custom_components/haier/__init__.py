@@ -26,6 +26,14 @@ def _cancel_token_updater(hass: HomeAssistant) -> None:
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
+    # Older login responses can return a numeric userId. Home Assistant
+    # requires ConfigEntry.unique_id to be a string.
+    if entry.unique_id is not None and not isinstance(entry.unique_id, str):
+        hass.config_entries.async_update_entry(
+            entry,
+            unique_id=str(entry.unique_id),
+        )
+
     hass.data.setdefault(DOMAIN, {
         'devices': [],
         'cancel_token_updater': None,

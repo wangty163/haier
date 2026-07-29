@@ -17,7 +17,7 @@ class ConfigFlowAuthTest(IsolatedAsyncioTestCase):
         account_client = MagicMock()
         account_client.get_user_info = AsyncMock(
             return_value={
-                "userId": "user-id",
+                "userId": 1322391014,
                 "mobile": "13800138000",
                 "username": "user",
             }
@@ -53,7 +53,7 @@ class ConfigFlowAuthTest(IsolatedAsyncioTestCase):
         )
         login_client.login.assert_awaited_once_with("13800138000", "secret")
         account_client.get_user_info.assert_awaited_once_with()
-        self.assertEqual(user_info["userId"], "user-id")
+        self.assertEqual(user_info["userId"], "1322391014")
         self.assertEqual(account["client_id"], "stable-client-id")
         self.assertEqual(account["app_source"], APP_SOURCE_APP)
         self.assertNotIn("username", account)

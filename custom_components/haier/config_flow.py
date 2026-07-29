@@ -87,6 +87,7 @@ async def _async_authenticate(
 
     client = HaierClient(hass, client_id, token_info.token, APP_SOURCE_APP)
     user_info = await client.get_user_info()
+    user_info['userId'] = str(user_info['userId'])
     account = build_account_data(
         client_id=client_id,
         token=token_info.token,

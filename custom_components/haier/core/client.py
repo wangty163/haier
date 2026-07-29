@@ -185,7 +185,7 @@ class HaierClient:
                 raise HaierClientException('Error getting user info, error: {}'.format(content['error_description']))
 
             return {
-                'userId': content['userId'],
+                'userId': str(content['userId']),
                 'mobile': content['mobile'],
                 'username': content['username']
             }
