@@ -1,10 +1,18 @@
 import unittest
+from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase
+from unittest.mock import patch
 
+from homeassistant.components.binary_sensor import BinarySensorDeviceClass
 from homeassistant.const import Platform
 
+from custom_components.haier import _remove_stale_profile_entities
+from custom_components.haier.binary_sensor import HaierBinarySensor
 from custom_components.haier.core.app_profile import get_cloud_preferences
-from custom_components.haier.core.attribute import V1SpecAttributeParser
+from custom_components.haier.core.attribute import (
+    HaierAttribute,
+    V1SpecAttributeParser,
+)
 from custom_components.haier.core.device import HaierDevice
 
 
@@ -99,12 +107,71 @@ class DishwasherAppProfileTest(unittest.TestCase):
         )
 
         self.assertEqual(strong.display_name, "加强")
-        self.assertEqual(buzzer.display_name, "蜂鸣音开关")
-        self.assertNotIn("invert_bool", buzzer.ext)
+        self.assertEqual(buzzer.display_name, "蜂鸣音")
+        self.assertTrue(buzzer.ext["invert_bool"])
         self.assertEqual(hardness.display_name, "水软档位")
         self.assertEqual(hardness.options["native_min_value"], 0)
         self.assertEqual(hardness.options["native_max_value"], 5)
         self.assertEqual(hardness.options["native_step"], 1)
+
+    def test_status_is_not_exposed_as_a_switch(self):
+        malformed_door = self.parser.parse_attribute(
+            list_attribute(
+                "doorStatus",
+                "门状态",
+                [(True, "开"), (False, "关")],
+                value=False,
+            )
+        )
+        door = self.parser.parse_attribute(
+            list_attribute(
+                "doorCloseStatus",
+                "关门状态",
+                [(False, "未关门"), (True, "已关门")],
+                value=True,
+                writable=False,
+            )
+        )
+        legacy_control = self.parser.parse_attribute(
+            list_attribute(
+                "projectionLampStatus",
+                "投影灯状态",
+                [(False, "关"), (True, "开")],
+                value=False,
+            )
+        )
+
+        self.assertIsNone(malformed_door)
+        self.assertIsNone(legacy_control)
+        self.assertEqual(door.platform, Platform.BINARY_SENSOR)
+        self.assertEqual(door.display_name, "门状态")
+        self.assertEqual(
+            door.options["device_class"],
+            BinarySensorDeviceClass.DOOR,
+        )
+        self.assertTrue(door.ext["invert_bool"])
+
+    def test_app_controls_keep_semantic_platforms(self):
+        strong = self.parser.parse_attribute(
+            list_attribute(
+                "strongStatus",
+                "加强洗功能状态",
+                [(False, "关"), (True, "开")],
+                value=False,
+            )
+        )
+        power_on = self.parser.parse_attribute(
+            list_attribute(
+                "onOffStatus",
+                "开关机状态",
+                [(True, "开机")],
+                value=False,
+            )
+        )
+
+        self.assertEqual(strong.platform, Platform.SWITCH)
+        self.assertEqual(power_on.platform, Platform.BUTTON)
+        self.assertEqual(power_on.ext["command_value"], "true")
 
     def test_reservation_uses_official_app_range_without_snapshot_value(self):
         reservation = self.parser.parse_attribute(
@@ -171,6 +238,42 @@ class DishwasherAppProfileTest(unittest.TestCase):
             ["强力", "酒具", "智能", "水果", "日常", "超快"],
         )
 
+    def test_running_state_and_control_have_distinct_semantics(self):
+        running_mode = list_attribute(
+            "runningMode",
+            "运行状态",
+            [("1", "启动"), ("2", "暂停")],
+            value="2",
+            writable=False,
+        )
+
+        state = self.parser.parse_attribute(running_mode)
+        controls = list(self.parser.parse_global([running_mode]))
+
+        self.assertEqual(state.platform, Platform.SENSOR)
+        self.assertEqual(state.display_name, "运行状态")
+        self.assertEqual(len(controls), 1)
+        self.assertEqual(controls[0].platform, Platform.SELECT)
+        self.assertEqual(controls[0].display_name, "运行控制")
+
+    def test_writable_non_app_select_has_no_duplicate_control(self):
+        partition_wash = list_attribute(
+            "partitionWashStatus",
+            "分区洗功能状态",
+            [
+                ("0", "取消分区洗"),
+                ("1", "下层洗"),
+                ("2", "上层洗"),
+            ],
+            value="0",
+        )
+
+        self.assertIsNone(self.parser.parse_attribute(partition_wash))
+        self.assertEqual(
+            list(self.parser.parse_global([partition_wash])),
+            [],
+        )
+
     def test_cloud_preference_names_match_official_app(self):
         self.assertEqual(
             get_cloud_preferences("FA08JM001", "CWC10-B29BKU1"),
@@ -232,11 +335,136 @@ class FridgeAppProfileTest(unittest.TestCase):
         })
 
         self.assertEqual(purification.display_name, "冷藏室开启净化")
-        self.assertEqual(purification.options["options"], ["执行"])
+        self.assertEqual(purification.platform, Platform.BUTTON)
+        self.assertEqual(purification.ext["command_value"], "true")
         self.assertEqual(valley_start.platform, Platform.TIME)
         self.assertEqual(
             valley_start.display_name,
             "分时用电谷段开始时间",
+        )
+
+    def test_door_statuses_are_door_binary_sensors(self):
+        door = self.parser.parse_attribute(
+            list_attribute(
+                "refrigeratorDoorStatus",
+                "冷藏室门开关状态",
+                [(True, "开"), (False, "关")],
+                value=False,
+                writable=False,
+            )
+        )
+
+        self.assertEqual(door.platform, Platform.BINARY_SENSOR)
+        self.assertEqual(door.display_name, "冷藏室门状态")
+        self.assertEqual(
+            door.options["device_class"],
+            BinarySensorDeviceClass.DOOR,
+        )
+
+
+class GenericProductSemanticsTest(unittest.TestCase):
+    def test_unknown_products_keep_generic_writable_attributes(self):
+        parser = V1SpecAttributeParser("UNKNOWN", "UNKNOWN")
+        attribute = parser.parse_attribute(
+            list_attribute(
+                "doorStatus",
+                "门状态",
+                [(True, "开"), (False, "关")],
+                value=False,
+            )
+        )
+
+        self.assertEqual(attribute.platform, Platform.SWITCH)
+
+
+class EntitySemanticsMigrationTest(unittest.TestCase):
+    def test_closed_door_value_is_off_for_ha_door_sensor(self):
+        device = SimpleNamespace(
+            id="dishwasher-id",
+            name="洗碗机",
+            product_name="CWC10-B29BKU1",
+        )
+        attribute = HaierAttribute(
+            "doorCloseStatus",
+            "门状态",
+            Platform.BINARY_SENSOR,
+            {"device_class": BinarySensorDeviceClass.DOOR},
+            {"invert_bool": True},
+        )
+        entity = HaierBinarySensor(device, attribute)
+        entity._attributes_data = {"doorCloseStatus": "true"}
+
+        entity._update_value()
+
+        self.assertIs(entity.is_on, False)
+
+    def test_stale_and_changed_platform_entities_are_removed(self):
+        registry = SimpleNamespace(
+            async_remove=lambda entity_id: removed.append(entity_id),
+        )
+        removed = []
+        entries = [
+            SimpleNamespace(
+                platform="haier",
+                unique_id="haier.abc_doorstatus",
+                entity_id="switch.old_door_status",
+            ),
+            SimpleNamespace(
+                platform="haier",
+                unique_id="haier.abc_onoffstatus",
+                entity_id="select.old_power_on",
+            ),
+            SimpleNamespace(
+                platform="haier",
+                unique_id="haier.abc_doorclosestatus",
+                entity_id="binary_sensor.door_status",
+            ),
+            SimpleNamespace(
+                platform="haier",
+                unique_id="haier.other_doorstatus",
+                entity_id="switch.other_device",
+            ),
+        ]
+        device = SimpleNamespace(
+            id="ABC",
+            product_code="FA08JM001",
+            product_name="CWC10-B29BKU1",
+            attributes=[
+                HaierAttribute(
+                    "doorCloseStatus",
+                    "门状态",
+                    Platform.BINARY_SENSOR,
+                ),
+                HaierAttribute(
+                    "onOffStatus",
+                    "开机",
+                    Platform.BUTTON,
+                ),
+            ],
+        )
+
+        with (
+            patch(
+                "custom_components.haier.er.async_get",
+                return_value=registry,
+            ),
+            patch(
+                "custom_components.haier.er.async_entries_for_config_entry",
+                return_value=entries,
+            ),
+        ):
+            _remove_stale_profile_entities(
+                SimpleNamespace(),
+                SimpleNamespace(entry_id="entry-id"),
+                [device],
+            )
+
+        self.assertEqual(
+            removed,
+            [
+                "switch.old_door_status",
+                "select.old_power_on",
+            ],
         )
 
 

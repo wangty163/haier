@@ -67,6 +67,12 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
     def parse_attribute(self, attribute: dict) -> HaierAttribute:
         profile = self._app_profile.get(attribute.get('name'), {})
 
+        # For verified products, writable entities are an App control allowlist.
+        # Some digital models incorrectly mark status/legacy attributes writable
+        # (for example dishwasher doorStatus), which must not become controls.
+        if self._app_profile and attribute.get('writable') and not profile:
+            return None
+
         # 通用模型里大量无值字段是工程命令。只有官方 App profile 明确列出的
         # 命令或设置才允许创建实体。
         if 'value' not in attribute and not profile.get('include_without_value'):
@@ -140,7 +146,10 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
         for attr in attributes:
             profile = self._app_profile.get(attr.get('name'), {})
             needs_companion_select = (
-                attr.get('name', '').lower() in _control_attrs
+                (
+                    not attr.get('writable')
+                    and attr.get('name', '').lower() in _control_attrs
+                )
                 or profile.get('companion_select')
             )
             if needs_companion_select \
@@ -160,7 +169,10 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
                     value_comparison_table[str(item['desc'])] = item['data']
                 yield HaierAttribute(
                     profiled_attr['name'] + '_sel',
-                    profiled_attr['desc'],
+                    profile.get(
+                        'companion_display_name',
+                        profiled_attr['desc'],
+                    ),
                     Platform.SELECT,
                     {'options': [item['desc'] for item in data_list]},
                     {'value_comparison_table': value_comparison_table, 'data_key': profiled_attr['name']}
@@ -198,11 +210,14 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
         if profile.get('invert_bool'):
             ext['invert_bool'] = True
 
+        options = dict(attribute.options)
+        options.update(profile.get('entity_options', {}))
+
         return HaierAttribute(
             attribute.key,
             profile.get('display_name', attribute.display_name),
             attribute.platform,
-            dict(attribute.options),
+            options,
             ext,
         )
 
@@ -341,8 +356,14 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
 
         return (equals_ignore_case(valueRange['type'], 'LIST')
                 and len(valueRange['dataList']) == 2
-                and contains_any_ignore_case(valueRange['dataList'][0]['data'], ['true', 'false'])
-                and contains_any_ignore_case(valueRange['dataList'][1]['data'], ['true', 'false']))
+                and contains_any_ignore_case(
+                    str(valueRange['dataList'][0]['data']),
+                    ['true', 'false'],
+                )
+                and contains_any_ignore_case(
+                    str(valueRange['dataList'][1]['data']),
+                    ['true', 'false'],
+                ))
 
     @staticmethod
     def _guess_state_class_device_class_and_unit(attribute) -> (str, str, str):

@@ -7,10 +7,12 @@ import aiohttp
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceEntry
 from homeassistant.helpers.event import async_track_time_interval
 
 from .const import DOMAIN, FILTER_TYPE_EXCLUDE, SUPPORTED_PLATFORMS
+from .core.app_profile import get_app_profile
 from .core.client import HaierClient, HaierClientException
 from .core.config import AccountConfig, DeviceFilterConfig, EntityFilterConfig
 from .core.device_gateway import HaierDeviceGateway
@@ -69,6 +71,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     _LOGGER.info('共获取到{}个设备'.format(len(devices)))
     hass.data[DOMAIN]['devices'] = devices
 
+    _remove_stale_profile_entities(hass, entry, devices)
+
     await hass.config_entries.async_forward_entry_setups(entry, SUPPORTED_PLATFORMS)
 
     # 实体完成注册后再启动网关，避免初始快照事件无人监听。
@@ -81,6 +85,53 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     entry.async_on_unload(entry.add_update_listener(entry_update_listener))
 
     return True
+
+
+def _remove_stale_profile_entities(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    devices,
+) -> None:
+    """Remove obsolete entities after an official App profile changes semantics."""
+    expected_platforms = {}
+    managed_prefixes = []
+    for device in devices:
+        if not get_app_profile(device.product_code, device.product_name):
+            continue
+
+        prefix = '{}.{}_'.format(DOMAIN, device.id).lower()
+        managed_prefixes.append(prefix)
+        for attribute in device.attributes:
+            expected_platforms[
+                '{}{}'.format(prefix, attribute.key).lower()
+            ] = attribute.platform.value
+
+    if not managed_prefixes:
+        return
+
+    registry = er.async_get(hass)
+    for registry_entry in er.async_entries_for_config_entry(
+        registry,
+        entry.entry_id,
+    ):
+        unique_id = registry_entry.unique_id.lower()
+        if (
+            registry_entry.platform != DOMAIN
+            or not any(unique_id.startswith(prefix) for prefix in managed_prefixes)
+        ):
+            continue
+
+        expected_platform = expected_platforms.get(unique_id)
+        actual_platform = registry_entry.entity_id.split('.', 1)[0]
+        if expected_platform is None or expected_platform != actual_platform:
+            _LOGGER.info(
+                "移除已过期的海尔实体 %s（当前平台：%s，预期平台：%s）",
+                registry_entry.entity_id,
+                actual_platform,
+                expected_platform,
+            )
+            registry.async_remove(registry_entry.entity_id)
+
 
 async def token_updater(hass: HomeAssistant, entry: ConfigEntry):
     """

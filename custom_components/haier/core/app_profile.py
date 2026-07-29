@@ -5,13 +5,29 @@ controls as temporarily read-only.  These profiles only describe controls that
 are present in the official App for the matching product.
 """
 
+from homeassistant.components.binary_sensor import BinarySensorDeviceClass
 from homeassistant.const import Platform
 
 DISHWASHER_PROFILE = {
+    "doorCloseStatus": {
+        "display_name": "门状态",
+        "entity_options": {
+            "device_class": BinarySensorDeviceClass.DOOR,
+        },
+        # The model reports true when closed; HA door sensors are on when open.
+        "invert_bool": True,
+    },
+    "runningMode": {
+        "display_name": "运行状态",
+        "companion_select": True,
+        "companion_display_name": "运行控制",
+        "companion_allowed_values": ("1", "2"),
+    },
     "strongStatus": {"display_name": "加强"},
     "resnStatus": {"display_name": "预约"},
     "washProg": {
         "display_name": "洗涤程序",
+        "companion_select": True,
         "companion_allowed_values": ("3", "10", "22", "27", "41", "42"),
     },
     "returnStandby": {
@@ -26,11 +42,13 @@ DISHWASHER_PROFILE = {
         "number_range": (0, 5, 1),
     },
     "buzzerDisabled": {
-        "display_name": "蜂鸣音开关",
+        "display_name": "蜂鸣音",
+        "invert_bool": True,
     },
     "onOffStatus": {
         "display_name": "开机",
-        "value_descriptions": {"true": "开机"},
+        "platform": Platform.BUTTON,
+        "command_value": "true",
     },
     "remoteCtrValid": {"display_name": "远程授权"},
     "resnTime": {
@@ -60,9 +78,34 @@ DISHWASHER_CLOUD_PREFERENCES = {
 
 
 FRIDGE_PROFILE = {
+    "refrigeratorDoorStatus": {
+        "display_name": "冷藏室门状态",
+        "entity_options": {
+            "device_class": BinarySensorDeviceClass.DOOR,
+        },
+    },
+    "freezerDoorStatus": {
+        "display_name": "冷冻室门状态",
+        "entity_options": {
+            "device_class": BinarySensorDeviceClass.DOOR,
+        },
+    },
+    "refrigerator2DoorStatus": {
+        "display_name": "冷藏室门2状态",
+        "entity_options": {
+            "device_class": BinarySensorDeviceClass.DOOR,
+        },
+    },
+    "freezer2DoorStatus": {
+        "display_name": "冷冻室门2状态",
+        "entity_options": {
+            "device_class": BinarySensorDeviceClass.DOOR,
+        },
+    },
     "refSterilizationForcedOff": {
         "display_name": "冷藏室关闭净化",
-        "value_descriptions": {"true": "执行"},
+        "platform": Platform.BUTTON,
+        "command_value": "true",
     },
     "intelligenceMode": {"display_name": "智能存储"},
     "vtRoom2TargetTempLevel": {"display_name": "婴爱空间"},
@@ -82,7 +125,8 @@ FRIDGE_PROFILE = {
     },
     "refSterilizationForcedOn": {
         "display_name": "冷藏室开启净化",
-        "value_descriptions": {"true": "执行"},
+        "platform": Platform.BUTTON,
+        "command_value": "true",
     },
     "refrigeratorTargetTempLevel": {
         "display_name": "冷藏室",

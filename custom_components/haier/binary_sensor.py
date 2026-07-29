@@ -36,7 +36,10 @@ class HaierBinarySensor(HaierAbstractEntity, BinarySensorEntity):
             return
 
         try:
-            self._attr_is_on = try_read_as_bool(value)
+            is_on = try_read_as_bool(value)
+            self._attr_is_on = (
+                not is_on if self._attribute.ext.get('invert_bool') else is_on
+            )
         except ValueError:
             _LOGGER.exception('entity [{}] read value failed'.format(self._attr_unique_id))
             self._attr_available = False
