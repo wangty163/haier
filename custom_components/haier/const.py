@@ -3,8 +3,10 @@ from homeassistant.const import Platform
 DOMAIN = 'haier'
 
 SUPPORTED_PLATFORMS = [
+    Platform.BUTTON,
     Platform.SELECT,
     Platform.NUMBER,
+    Platform.TIME,
     Platform.SENSOR,
     Platform.BINARY_SENSOR,
     Platform.SWITCH,

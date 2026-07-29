@@ -41,7 +41,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         raise ConfigEntryNotReady("无法连接海尔云服务") from err
 
     account_cfg = AccountConfig(hass, entry)
-    client = HaierClient(hass, account_cfg.client_id, account_cfg.token, account_cfg.app_source)
+    client = HaierClient(
+        hass,
+        account_cfg.client_id,
+        account_cfg.token,
+        account_cfg.app_source,
+        entry.unique_id,
+    )
 
     # 是否忽略设备离线状态，供实体在收到离线事件时判断是否保留最后状态
     hass.data[DOMAIN]['ignore_device_offline'] = account_cfg.ignore_device_offline

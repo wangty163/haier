@@ -1,5 +1,6 @@
 import logging
 from abc import abstractmethod, ABC
+from copy import deepcopy
 from typing import List
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
@@ -7,17 +8,25 @@ from homeassistant.components.switch import SwitchDeviceClass
 from homeassistant.const import Platform, UnitOfTemperature, PERCENTAGE, UnitOfVolume, UnitOfEnergy
 
 from custom_components.haier.helpers import equals_ignore_case, contains_any_ignore_case
+from .app_profile import get_app_profile
 
 _LOGGER = logging.getLogger(__name__)
 
 class HaierAttribute:
 
-    def __init__(self, key: str, display_name: str, platform: Platform, options: dict = {}, ext: dict = {}):
+    def __init__(
+        self,
+        key: str,
+        display_name: str,
+        platform: Platform,
+        options: dict | None = None,
+        ext: dict | None = None,
+    ):
         self._key = key
         self._display_name = display_name
         self._platform = platform
-        self._options = options
-        self._ext = ext
+        self._options = options or {}
+        self._ext = ext or {}
 
     @property
     def key(self) -> str:
@@ -52,23 +61,54 @@ class HaierAttributeParser(ABC):
 
 class V1SpecAttributeParser(HaierAttributeParser, ABC):
 
+    def __init__(self, product_code: str | None = None, product_name: str | None = None):
+        self._app_profile = get_app_profile(product_code, product_name)
+
     def parse_attribute(self, attribute: dict) -> HaierAttribute:
-        # 没有value的attribute后续无法正常使用，所以需要过滤掉
-        if 'value' not in attribute:
+        profile = self._app_profile.get(attribute.get('name'), {})
+
+        # 通用模型里大量无值字段是工程命令。只有官方 App profile 明确列出的
+        # 命令或设置才允许创建实体。
+        if 'value' not in attribute and not profile.get('include_without_value'):
             return None
 
-        if not attribute['writable'] and attribute['readable']:
-            return self._parse_as_sensor(attribute)
+        attribute = self._apply_profile(attribute, profile)
+        platform = profile.get('platform')
 
-        if attribute['writable'] and equals_ignore_case(attribute['valueRange']['type'], 'STEP') and contains_any_ignore_case(attribute['valueRange']['dataStep']['dataType'], ['Integer', 'Double']):
-            return self._parse_as_number(attribute)
+        if platform == Platform.BUTTON:
+            return HaierAttribute(
+                attribute['name'],
+                attribute['desc'],
+                Platform.BUTTON,
+                ext={
+                    'data_key': attribute['name'],
+                    'command_value': profile['command_value'],
+                },
+            )
+
+        if platform == Platform.TIME:
+            return HaierAttribute(
+                attribute['name'],
+                attribute['desc'],
+                Platform.TIME,
+            )
+
+        if not attribute.get('writable') and attribute.get('readable'):
+            result = self._parse_as_sensor(attribute)
+            return self._decorate(result, profile)
+
+        if attribute.get('writable') and equals_ignore_case(attribute['valueRange']['type'], 'STEP') and contains_any_ignore_case(attribute['valueRange']['dataStep']['dataType'], ['Integer', 'Double']):
+            result = self._parse_as_number(attribute)
+            return self._decorate(result, profile)
 
         # 一定要在select之前，不然会被select覆盖
-        if attribute['writable'] and V1SpecAttributeParser._is_binary_attribute(attribute):
-            return self._parse_as_switch(attribute)
+        if attribute.get('writable') and V1SpecAttributeParser._is_binary_attribute(attribute):
+            result = self._parse_as_switch(attribute)
+            return self._decorate(result, profile)
 
-        if attribute['writable'] and equals_ignore_case(attribute['valueRange']['type'], 'LIST'):
-            return self._parse_as_select(attribute)
+        if attribute.get('writable') and equals_ignore_case(attribute['valueRange']['type'], 'LIST'):
+            result = self._parse_as_select(attribute)
+            return self._decorate(result, profile)
 
         return None
 
@@ -98,20 +138,73 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
         # 同时额外生成Select实体用于在HA中切换模式
         _control_attrs = {'washprog', 'partitionwashstatus', 'runningmode'}
         for attr in attributes:
-            if attr['name'].lower() in _control_attrs \
+            profile = self._app_profile.get(attr.get('name'), {})
+            needs_companion_select = (
+                attr.get('name', '').lower() in _control_attrs
+                or profile.get('companion_select')
+            )
+            if needs_companion_select \
                     and equals_ignore_case(attr['valueRange']['type'], 'LIST'):
+                profiled_attr = self._apply_profile(attr, profile)
+                allowed_values = profile.get('companion_allowed_values')
+                data_list = profiled_attr['valueRange']['dataList']
+                if allowed_values:
+                    data_list = [
+                        item
+                        for item in data_list
+                        if str(item['data']) in allowed_values
+                    ]
                 value_comparison_table = {}
-                for item in attr['valueRange']['dataList']:
+                for item in data_list:
                     value_comparison_table[str(item['data'])] = item['desc']
                     value_comparison_table[str(item['desc'])] = item['data']
                 yield HaierAttribute(
-                    attr['name'] + '_sel',
-                    attr['desc'],
+                    profiled_attr['name'] + '_sel',
+                    profiled_attr['desc'],
                     Platform.SELECT,
-                    {'options': [item['desc'] for item in attr['valueRange']['dataList']]},
-                    {'value_comparison_table': value_comparison_table, 'data_key': attr['name']}
+                    {'options': [item['desc'] for item in data_list]},
+                    {'value_comparison_table': value_comparison_table, 'data_key': profiled_attr['name']}
                 )
 
+    @staticmethod
+    def _apply_profile(attribute: dict, profile: dict) -> dict:
+        if not profile:
+            return attribute
+
+        result = deepcopy(attribute)
+        result['desc'] = profile.get('display_name', result.get('desc'))
+
+        if 'number_range' in profile:
+            min_value, max_value, step = profile['number_range']
+            data_step = result['valueRange']['dataStep']
+            data_step['minValue'] = str(min_value)
+            data_step['maxValue'] = str(max_value)
+            data_step['step'] = str(step)
+
+        value_descriptions = profile.get('value_descriptions', {})
+        for item in result.get('valueRange', {}).get('dataList', []):
+            replacement = value_descriptions.get(str(item.get('data')).lower())
+            if replacement:
+                item['desc'] = replacement
+
+        return result
+
+    @staticmethod
+    def _decorate(attribute: HaierAttribute, profile: dict) -> HaierAttribute:
+        if not profile:
+            return attribute
+
+        ext = dict(attribute.ext)
+        if profile.get('invert_bool'):
+            ext['invert_bool'] = True
+
+        return HaierAttribute(
+            attribute.key,
+            profile.get('display_name', attribute.display_name),
+            attribute.platform,
+            dict(attribute.options),
+            ext,
+        )
 
     @staticmethod
     def _parse_as_sensor(attribute):
@@ -148,7 +241,7 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
         options = {
             'native_min_value': float(step['minValue']),
             'native_max_value': float(step['maxValue']),
-            'native_step': step['step']
+            'native_step': float(step['step'])
         }
 
         _, _, unit = V1SpecAttributeParser._guess_state_class_device_class_and_unit(attribute)
@@ -165,7 +258,8 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
             value_comparison_table[str(item['desc'])] = item['data']
 
         ext = {
-            'value_comparison_table': value_comparison_table
+            'value_comparison_table': value_comparison_table,
+            'stateless': len(attribute['valueRange']['dataList']) == 1,
         }
 
         options = {

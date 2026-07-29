@@ -40,6 +40,13 @@ GET_USER_INFO_API = 'https://account-api.haier.net/v2/haier/userinfo'
 GET_DEVICES_API = 'https://uws.haier.net/uds/v1/protected/deviceinfos'
 GET_WSS_GW_API = 'https://uws.haier.net/gmsWS/wsag/assign'
 GET_DIGITAL_MODEL_API = 'https://uws.haier.net/shadow/v1/devdigitalmodels'
+GET_DISHWASHER_SWITCHES_API = (
+    'https://smartwash.haier.net/dishwasher-api/setting/switch/union'
+)
+SET_DISHWASHER_SWITCH_API = (
+    'https://smartwash.haier.net/dishwasher-api/setting/switch'
+)
+APP_VERSION = '10.22.0'
 
 def retry_on_exception(exceptions, max_tries=3):
     """
@@ -108,10 +115,18 @@ class HaierClientException(Exception):
 
 class HaierClient:
 
-    def __init__(self, hass: HomeAssistant, client_id: str, token: str, app_source: str = DEFAULT_APP_SOURCE):
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        client_id: str,
+        token: str,
+        app_source: str = DEFAULT_APP_SOURCE,
+        user_id: str | None = None,
+    ):
         self._client_id = client_id
         self._token = token
         self._app_id, self._app_key = APP_SOURCES.get(app_source, APP_SOURCES[DEFAULT_APP_SOURCE])
+        self._user_id = str(user_id) if user_id is not None else ''
         self._hass = hass
         self._session = async_get_clientsession(hass)
 
@@ -312,6 +327,83 @@ class HaierClient:
             self._assert_response_successful(content)
 
             return content['agAddr'].replace('http://', 'wss://')
+
+    @retry_on_exception(exceptions=(aiohttp.ClientError, asyncio.TimeoutError))
+    async def get_dishwasher_preferences(self, device_id: str) -> dict:
+        """Get official App cloud preferences for a dishwasher."""
+        headers = self._generate_smartwash_headers()
+        async with self._session.get(
+            url=GET_DISHWASHER_SWITCHES_API,
+            headers=headers,
+            params={'mac': device_id, 'boardVersion': ''},
+        ) as response:
+            response.raise_for_status()
+            content = await response.json(content_type=None)
+            self._assert_response_successful(content)
+            return {
+                item['switchMark']: {
+                    'display_name': item.get('switchName'),
+                    'value': self._read_preference_bool(
+                        item.get('switchStatus')
+                    ),
+                    'unit_index': item.get('unitIndex', 0),
+                }
+                for item in (content.get('retData') or {}).get('switches') or []
+                if item.get('switchMark')
+            }
+
+    @retry_on_exception(exceptions=(aiohttp.ClientError, asyncio.TimeoutError))
+    async def set_dishwasher_preference(
+        self,
+        device_id: str,
+        preference: str,
+        value: bool,
+    ) -> None:
+        """Set an official App cloud preference for a dishwasher."""
+        headers = self._generate_smartwash_headers()
+        payload = {
+            'switchCode': preference,
+            'switchValue': value,
+            'mac': device_id,
+        }
+        async with self._session.post(
+            url=SET_DISHWASHER_SWITCH_API,
+            headers=headers,
+            json=payload,
+        ) as response:
+            response.raise_for_status()
+            content = await response.json(content_type=None)
+            self._assert_response_successful(content)
+
+    def _generate_smartwash_headers(self) -> dict:
+        """Build headers used by the official dishwasher App backend."""
+        return {
+            'Authorization': f'Basic {self._token}',
+            'accessToken': self._token,
+            'appId': self._app_id,
+            'appKey': self._app_key,
+            'appVersion': APP_VERSION,
+            'clientId': self._client_id,
+            'Content-Type': 'application/json;charset=utf-8',
+            'language': 'zh-cn',
+            'sequenceId': (
+                time.strftime('%Y%m%d%H%M%S')
+                + str(random.randint(100000, 999999))
+            ),
+            'timezone': '8',
+            'version': '2.0',
+            'uhomeAccessToken': self._token,
+            'uhomeUserId': self._user_id,
+            'uhomeAppId': self._app_id,
+            'userId': self._user_id,
+            'User-Agent': f'Mozilla/5.0 HaierSmartHome/{APP_VERSION}',
+        }
+
+    @staticmethod
+    def _read_preference_bool(value) -> bool:
+        if isinstance(value, bool):
+            return value
+        return str(value).lower() in ('true', '1')
 
     async def _generate_common_headers(self, api, body=''):
         """
