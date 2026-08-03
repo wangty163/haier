@@ -1,7 +1,7 @@
 import asyncio
 import logging
-import time
 from datetime import timedelta
+from time import time as epoch_time
 
 import aiohttp
 from homeassistant.config_entries import ConfigEntry
@@ -157,13 +157,13 @@ async def token_updater(hass: HomeAssistant, entry: ConfigEntry):
             token_valid = False
 
         # token有效且里过期时间大于1天时不更新token
-        if token_valid and cfg.expires_at - int(time.time()) > 86400:
+        if token_valid and cfg.expires_at - int(epoch_time()) > 86400:
             return False
 
         token_info = await client.refresh_token(cfg.refresh_token)
         cfg.token = token_info.token
         cfg.refresh_token = token_info.refresh_token
-        cfg.expires_at = int(time.time()) + token_info.expires_in
+        cfg.expires_at = int(epoch_time()) + token_info.expires_in
         cfg.save()
 
         return True
