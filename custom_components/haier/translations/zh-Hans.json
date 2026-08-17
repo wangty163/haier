@@ -1,25 +1,40 @@
 {
     "config": {
+        "abort": {
+            "unique_id_mismatch": "输入的凭据属于另一个海尔智家账号"
+        },
         "error": {
-            "auth_error": "认证失败"
+            "auth_error": "认证失败，请检查账号和密码",
+            "cannot_connect": "无法连接海尔云服务",
+            "unknown": "发生未知错误"
         },
         "step": {
             "user": {
                 "title": "账号设置",
-                "description": "配置海尔智家账户",
+                "description": "使用海尔智家 App 的账号密码登录。密码仅用于换取令牌，不会保存。",
                 "data": {
-                    "client_id": "Client Id",
-                    "refresh_token": "Refresh Token",
-                    "app_source": "Token来源",
+                    "username": "海尔智家账号",
+                    "password": "密码",
                     "default_load_all_entity": "默认加载所有实体",
                     "ignore_device_offline": "忽略设备离线状态（离线时保留最后状态）"
+                }
+            },
+            "reauth_confirm": {
+                "title": "重新登录海尔智家",
+                "description": "已保存的海尔登录状态失效，请重新输入账号密码恢复集成。",
+                "data": {
+                    "username": "海尔智家账号",
+                    "password": "密码"
                 }
             }
         }
     },
     "options": {
         "error": {
-            "auth_error": "认证失败"
+            "account_mismatch": "输入的凭据属于另一个海尔智家账号",
+            "auth_error": "认证失败，请检查账号和密码",
+            "cannot_connect": "无法连接海尔云服务",
+            "unknown": "发生未知错误"
         },
         "step": {
             "init": {
@@ -32,9 +47,8 @@
             "account": {
                 "title": "账号设置",
                 "data": {
-                    "client_id": "Client Id",
-                    "refresh_token": "Refresh Token",
-                    "app_source": "Token来源",
+                    "username": "海尔智家账号",
+                    "password": "密码",
                     "default_load_all_entity": "默认加载所有实体",
                     "ignore_device_offline": "忽略设备离线状态（离线时保留最后状态）"
                 }

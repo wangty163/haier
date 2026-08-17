@@ -32,8 +32,15 @@ class HaierSelect(HaierAbstractEntity, SelectEntity):
             raise ValueError('value_comparison_table must exist')
 
     def _update_value(self):
+        if self._attribute.ext.get('stateless'):
+            self._attr_current_option = None
+            return
+
         data_key = self._attribute.ext.get('data_key', self._attribute.key)
-        self._attr_current_option = self._get_value_from_comparison_table(self._attributes_data[data_key])
+        value = self._attributes_data.get(data_key)
+        self._attr_current_option = (
+            None if value in (None, '') else self._get_value_from_comparison_table(value)
+        )
 
     def select_option(self, option: str) -> None:
         data_key = self._attribute.ext.get('data_key', self._attribute.key)
