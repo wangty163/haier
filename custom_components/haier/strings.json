@@ -1,25 +1,40 @@
 {
     "config": {
+        "abort": {
+            "unique_id_mismatch": "The credentials belong to a different Haier account"
+        },
         "error": {
-            "auth_error": "Authentication failed"
+            "auth_error": "Authentication failed",
+            "cannot_connect": "Unable to connect to the Haier cloud",
+            "unknown": "Unexpected error"
         },
         "step": {
             "user": {
                 "data": {
-                    "client_id": "Client Id",
-                    "refresh_token": "Refresh Token",
-                    "app_source": "Token source",
+                    "username": "Haier Smart Home account",
+                    "password": "Password",
                     "default_load_all_entity": "Default load all entity",
                     "ignore_device_offline": "Ignore device offline status (keep last state when offline)"
                 },
-                "description": "Enter your Haier Token.",
+                "description": "Sign in with the account used by the Haier Smart Home app. The password is exchanged for tokens and is not saved.",
                 "title": "Configure account information"
+            },
+            "reauth_confirm": {
+                "data": {
+                    "username": "Haier Smart Home account",
+                    "password": "Password"
+                },
+                "description": "The saved Haier session is no longer valid. Sign in again to restore the integration.",
+                "title": "Reauthenticate Haier Smart Home"
             }
         }
     },
     "options": {
         "error": {
-            "auth_error": "Authentication failed"
+            "account_mismatch": "The credentials belong to a different Haier account",
+            "auth_error": "Authentication failed",
+            "cannot_connect": "Unable to connect to the Haier cloud",
+            "unknown": "Unexpected error"
         },
         "step": {
             "init": {
@@ -32,9 +47,8 @@
             "account": {
                 "title": "Account information",
                 "data": {
-                    "client_id": "Client Id",
-                    "refresh_token": "Refresh Token",
-                    "app_source": "Token source",
+                    "username": "Haier Smart Home account",
+                    "password": "Password",
                     "default_load_all_entity": "Default load all entity",
                     "ignore_device_offline": "Ignore device offline status (keep last state when offline)"
                 }

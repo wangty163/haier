@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import hashlib
 import json
@@ -5,7 +7,7 @@ import logging
 import random
 import time
 from functools import wraps
-from typing import List, Dict
+from typing import Dict, List
 from urllib.parse import urlparse
 
 import aiohttp
@@ -13,6 +15,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
 
+from .auth import build_login_body, sign_request
 from .device import HaierDevice
 
 _LOGGER = logging.getLogger(__name__)
@@ -31,11 +34,19 @@ APP_SOURCES = {
     APP_SOURCE_APP: ('MB-UZHSH-0001', '5dfca8714eb26e3a776e58a8273c8752'),
 }
 
+LOGIN_API = 'https://zj.haier.net/oauthserver/account/v1/login'
 REFRESH_TOKEN_API = 'https://zj.haier.net/api-gw/oauthserver/account/v1/refreshToken'
 GET_USER_INFO_API = 'https://account-api.haier.net/v2/haier/userinfo'
 GET_DEVICES_API = 'https://uws.haier.net/uds/v1/protected/deviceinfos'
 GET_WSS_GW_API = 'https://uws.haier.net/gmsWS/wsag/assign'
 GET_DIGITAL_MODEL_API = 'https://uws.haier.net/shadow/v1/devdigitalmodels'
+GET_DISHWASHER_SWITCHES_API = (
+    'https://smartwash.haier.net/dishwasher-api/setting/switch/union'
+)
+SET_DISHWASHER_SWITCH_API = (
+    'https://smartwash.haier.net/dishwasher-api/setting/switch'
+)
+APP_VERSION = '10.22.0'
 
 def retry_on_exception(exceptions, max_tries=3):
     """
@@ -96,17 +107,52 @@ class TokenInfo:
 
 
 class HaierClientException(Exception):
-    pass
+
+    def __init__(self, message: str, code: str | None = None):
+        super().__init__(message)
+        self.code = code
 
 
 class HaierClient:
 
-    def __init__(self, hass: HomeAssistant, client_id: str, token: str, app_source: str = DEFAULT_APP_SOURCE):
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        client_id: str,
+        token: str,
+        app_source: str = DEFAULT_APP_SOURCE,
+        user_id: str | None = None,
+    ):
         self._client_id = client_id
         self._token = token
         self._app_id, self._app_key = APP_SOURCES.get(app_source, APP_SOURCES[DEFAULT_APP_SOURCE])
+        self._user_id = str(user_id) if user_id is not None else ''
         self._hass = hass
         self._session = async_get_clientsession(hass)
+
+    async def login(self, username: str, password: str) -> TokenInfo:
+        """
+        使用海尔智家 App 账号密码登录。
+
+        密码只存在于本次 HTTPS 请求内；调用方应仅持久化返回的 token。
+        """
+        body = build_login_body(username, password)
+        headers = await self._generate_common_headers(LOGIN_API)
+        headers.pop('accessToken', None)
+        headers['Content-Type'] = 'application/json'
+        headers['sign'] = sign_request(
+            LOGIN_API,
+            body,
+            self._app_id,
+            self._app_key,
+            headers['timestamp']
+        )
+
+        async with self._session.post(url=LOGIN_API, headers=headers, data=body) as response:
+            response.raise_for_status()
+            content = await response.json(content_type=None)
+            self._assert_response_successful(content)
+            return self._parse_token_info(content)
 
     @retry_on_exception(exceptions=(aiohttp.ClientError, asyncio.TimeoutError))
     async def refresh_token(self, refresh_token: str) -> TokenInfo:
@@ -122,13 +168,7 @@ class HaierClient:
         async with self._session.post(url=REFRESH_TOKEN_API, headers=headers, json=payload) as response:
             content = await response.json(content_type=None)
             self._assert_response_successful(content)
-
-            token_info = content['data']['tokenInfo']
-            return TokenInfo(
-                token_info['accountToken'],
-                token_info['refreshToken'],
-                token_info['expiresIn']
-            )
+            return self._parse_token_info(content)
 
     @retry_on_exception(exceptions=(aiohttp.ClientError, asyncio.TimeoutError))
     async def get_user_info(self) -> dict:
@@ -145,7 +185,7 @@ class HaierClient:
                 raise HaierClientException('Error getting user info, error: {}'.format(content['error_description']))
 
             return {
-                'userId': content['userId'],
+                'userId': str(content['userId']),
                 'mobile': content['mobile'],
                 'username': content['username']
             }
@@ -288,6 +328,83 @@ class HaierClient:
 
             return content['agAddr'].replace('http://', 'wss://')
 
+    @retry_on_exception(exceptions=(aiohttp.ClientError, asyncio.TimeoutError))
+    async def get_dishwasher_preferences(self, device_id: str) -> dict:
+        """Get official App cloud preferences for a dishwasher."""
+        headers = self._generate_smartwash_headers()
+        async with self._session.get(
+            url=GET_DISHWASHER_SWITCHES_API,
+            headers=headers,
+            params={'mac': device_id, 'boardVersion': ''},
+        ) as response:
+            response.raise_for_status()
+            content = await response.json(content_type=None)
+            self._assert_response_successful(content)
+            return {
+                item['switchMark']: {
+                    'display_name': item.get('switchName'),
+                    'value': self._read_preference_bool(
+                        item.get('switchStatus')
+                    ),
+                    'unit_index': item.get('unitIndex', 0),
+                }
+                for item in (content.get('retData') or {}).get('switches') or []
+                if item.get('switchMark')
+            }
+
+    @retry_on_exception(exceptions=(aiohttp.ClientError, asyncio.TimeoutError))
+    async def set_dishwasher_preference(
+        self,
+        device_id: str,
+        preference: str,
+        value: bool,
+    ) -> None:
+        """Set an official App cloud preference for a dishwasher."""
+        headers = self._generate_smartwash_headers()
+        payload = {
+            'switchCode': preference,
+            'switchValue': value,
+            'mac': device_id,
+        }
+        async with self._session.post(
+            url=SET_DISHWASHER_SWITCH_API,
+            headers=headers,
+            json=payload,
+        ) as response:
+            response.raise_for_status()
+            content = await response.json(content_type=None)
+            self._assert_response_successful(content)
+
+    def _generate_smartwash_headers(self) -> dict:
+        """Build headers used by the official dishwasher App backend."""
+        return {
+            'Authorization': f'Basic {self._token}',
+            'accessToken': self._token,
+            'appId': self._app_id,
+            'appKey': self._app_key,
+            'appVersion': APP_VERSION,
+            'clientId': self._client_id,
+            'Content-Type': 'application/json;charset=utf-8',
+            'language': 'zh-cn',
+            'sequenceId': (
+                time.strftime('%Y%m%d%H%M%S')
+                + str(random.randint(100000, 999999))
+            ),
+            'timezone': '8',
+            'version': '2.0',
+            'uhomeAccessToken': self._token,
+            'uhomeUserId': self._user_id,
+            'uhomeAppId': self._app_id,
+            'userId': self._user_id,
+            'User-Agent': f'Mozilla/5.0 HaierSmartHome/{APP_VERSION}',
+        }
+
+    @staticmethod
+    def _read_preference_bool(value) -> bool:
+        if isinstance(value, bool):
+            return value
+        return str(value).lower() in ('true', '1')
+
     async def _generate_common_headers(self, api, body=''):
         """
         返回通用headers
@@ -316,7 +433,22 @@ class HaierClient:
     @staticmethod
     def _assert_response_successful(resp):
         if 'retCode' in resp and resp['retCode'] != '00000':
-            raise HaierClientException('接口返回异常: ' + resp['retInfo'])
+            raise HaierClientException(
+                '接口返回异常: ' + resp.get('retInfo', '未知错误'),
+                str(resp['retCode'])
+            )
+
+    @staticmethod
+    def _parse_token_info(resp) -> TokenInfo:
+        try:
+            token_info = resp['data']['tokenInfo']
+            return TokenInfo(
+                token_info['accountToken'],
+                token_info['refreshToken'],
+                token_info['expiresIn']
+            )
+        except (KeyError, TypeError) as err:
+            raise HaierClientException('令牌响应缺少 token 信息') from err
 
     @staticmethod
     def _sign(app_id, app_key, timestamp, body, url):

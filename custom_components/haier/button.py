@@ -1,6 +1,4 @@
-import logging
-
-from homeassistant.components.number import NumberEntity
+from homeassistant.components.button import ButtonEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
@@ -10,30 +8,31 @@ from .core.attribute import HaierAttribute
 from .core.device import HaierDevice
 from .entity import HaierAbstractEntity
 
-_LOGGER = logging.getLogger(__name__)
 
-
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities) -> None:
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    async_add_entities,
+) -> None:
     await async_register_entity(
         hass,
         entry,
         async_add_entities,
-        Platform.NUMBER,
-        lambda device, attribute: HaierNumber(device, attribute)
+        Platform.BUTTON,
+        lambda device, attribute: HaierButton(device, attribute),
     )
 
 
-class HaierNumber(HaierAbstractEntity, NumberEntity):
+class HaierButton(HaierAbstractEntity, ButtonEntity):
 
     def __init__(self, device: HaierDevice, attribute: HaierAttribute):
         super().__init__(device, attribute)
 
     def _update_value(self):
-        self._attr_native_value = self._attributes_data.get(self._attribute.key)
+        return
 
-    def set_native_value(self, value: float) -> None:
+    def press(self) -> None:
         self._send_command({
-            self._attribute.key: value
+            self._attribute.ext.get('data_key', self._attribute.key):
+                self._attribute.ext['command_value']
         })
-
-
