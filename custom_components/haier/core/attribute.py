@@ -324,9 +324,9 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
             raise RuntimeError('targetTemp attr not found')
 
         options = {
-            'min_temp': target_temperature_attr['valueRange']['dataStep']['minValue'],
-            'max_temp': target_temperature_attr['valueRange']['dataStep']['maxValue'],
-            'target_temperature_step': target_temperature_attr['valueRange']['dataStep']['step']
+            'min_temp': float(target_temperature_attr['valueRange']['dataStep']['minValue']),
+            'max_temp': float(target_temperature_attr['valueRange']['dataStep']['maxValue']),
+            'target_temperature_step': float(target_temperature_attr['valueRange']['dataStep']['step'])
         }
 
         ext = {
